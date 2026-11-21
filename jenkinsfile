@@ -116,10 +116,25 @@ pipeline {
 
                         rm -rf gitops-repo
 
-                        git clone \
-                            --branch "$GITOPS_BRANCH" \
-                            "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/faiz2020/7-Microservice-Project-GitOps.git" \
-                            gitops-repo
+			printf '%s\n' \
+    			'#!/bin/sh' \
+    			'case "$1" in' \
+    			'  *Username*) printf "%s\n" "$GIT_USERNAME" ;;' \
+    			'  *Password*) printf "%s\n" "$GIT_TOKEN" ;;' \
+    			'esac' > "$WORKSPACE/git-askpass.sh"
+
+			chmod 700 "$WORKSPACE/git-askpass.sh"
+
+			export GIT_ASKPASS="$WORKSPACE/git-askpass.sh"
+			export GIT_TERMINAL_PROMPT=0
+
+			trap 'rm -f "$WORKSPACE/git-askpass.sh"' EXIT
+
+			git clone \
+    			--branch "$GITOPS_BRANCH" \
+	    			"https://github.com/faiz2020/7-Microservice-Project-GitOps.git" \
+		    			gitops-repo			
+			
 
                         cd gitops-repo
 
