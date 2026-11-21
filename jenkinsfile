@@ -1,6 +1,10 @@
-
 pipeline {
     agent any
+
+    environment {
+        GITOPS_REPO = 'https://github.com/faiz2020/7-Microservice-Project-GitOps.git'
+        GITOPS_BRANCH = 'main'
+    }
 
     stages {
         stage('Checkout') {
@@ -13,6 +17,7 @@ pipeline {
         stage('Project Validation') {
             steps {
                 sh '''
+                    set -e
                     echo "===== MICROSERVICES ====="
                     ls services/
                     echo "===== DOCKERFILES ====="
@@ -25,8 +30,6 @@ pipeline {
             steps {
                 sh '''
                     set -e
-
-                    echo "===== BUILDING BACKEND IMAGES ====="
 
                     for service in \
                         auth-service \
@@ -44,8 +47,6 @@ pipeline {
                             services/$service
                     done
 
-                    echo "===== BUILDING FRONTEND ====="
-
                     docker build \
                         -t polyglot-frontend:dev \
                         -f frontend/Dockerfile \
@@ -56,8 +57,7 @@ pipeline {
                 '''
             }
         }
-        
-        
+
         stage('Push Images to Docker Hub') {
             steps {
                 withCredentials([
@@ -69,10 +69,10 @@ pipeline {
                 ]) {
                     sh '''
                         set -e
-        
+
                         echo "$DOCKERHUB_TOKEN" | docker login \
                             -u "$DOCKERHUB_USER" --password-stdin
-        
+
                         for service in \
                             auth-service \
                             catalog-service \
@@ -80,82 +80,97 @@ pipeline {
                             order-service \
                             payment-service \
                             notification-service \
-                            analytics-service
+                            analytics-service \
+                            frontend
                         do
-                            echo "Pushing $service"
-        
-                            docker tag polyglot-$service:dev \
-                                $DOCKERHUB_USER/polyglot-$service:build-$BUILD_NUMBER
-        
-                            docker push \
-                                $DOCKERHUB_USER/polyglot-$service:build-$BUILD_NUMBER
+                            image="$DOCKERHUB_USER/polyglot-$service:build-$BUILD_NUMBER"
+
+                            echo "Pushing $image"
+
+                            docker tag polyglot-$service:dev "$image"
+                            docker push "$image"
                         done
-        
-                        echo "Pushing frontend"
-        
-                        docker tag polyglot-frontend:dev \
-                            $DOCKERHUB_USER/polyglot-frontend:build-$BUILD_NUMBER
-        
-                        docker push \
-                            $DOCKERHUB_USER/polyglot-frontend:build-$BUILD_NUMBER
-        
+
                         docker logout
                     '''
                 }
             }
         }
-        
-        
-  
-stage('Deploy to Kubernetes') {
-    steps {
-        withCredentials([
-            usernamePassword(
-                credentialsId: 'dockerhub-creds',
-                usernameVariable: 'DOCKERHUB_USER',
-                passwordVariable: 'DOCKERHUB_TOKEN'
-            )
-        ]) {
-            withEnv(['KUBECONFIG=/tmp/jenkins-kubeconfig']) {
-                sh '''
-                    set -e
 
-                    echo "Deploying build-$BUILD_NUMBER to Kubernetes..."
+        stage('Update GitOps Repository') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'gitops-github-creds',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_TOKEN'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKERHUB_USER',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set -e
 
-                    for service in auth-service catalog-service inventory-service order-service payment-service notification-service analytics-service frontend
-                    do
-                        image="$DOCKERHUB_USER/polyglot-$service:build-$BUILD_NUMBER"
+                        rm -rf gitops-repo
 
-                        echo "Updating $service with $image"
+                        git clone \
+                            --branch "$GITOPS_BRANCH" \
+                            "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/faiz2020/7-Microservice-Project-GitOps.git" \
+                            gitops-repo
 
-                        kubectl set image deployment/"$service" \
-                          "$service=$image" \
-                          -n polyglot-commerce
+                        cd gitops-repo
 
-                        kubectl patch deployment "$service" \
-                          -n polyglot-commerce \
-                          --type=strategic \
-                          -p '{"spec":{"template":{"spec":{"containers":[{"name":"'"$service"'","imagePullPolicy":"Always"}]}}}}'
-                    done
+                        git config user.name "Jenkins CI"
+                        git config user.email "jenkins@localhost"
 
-                    echo "Waiting for deployment rollouts..."
+                        for service in \
+                            auth-service \
+                            catalog-service \
+                            inventory-service \
+                            order-service \
+                            payment-service \
+                            notification-service \
+                            analytics-service \
+                            frontend
+                        do
+                            manifest="apps/polyglot-commerce/$service/deployment.yaml"
+                            image="$DOCKERHUB_USER/polyglot-$service:build-$BUILD_NUMBER"
 
-                    for service in auth-service catalog-service inventory-service order-service payment-service notification-service analytics-service frontend
-                    do
-                        kubectl rollout status deployment/"$service" \
-                          -n polyglot-commerce \
-                          --timeout=180s
-                    done
+                            echo "Updating $service to $image"
 
-                    echo "Final deployment status:"
-                    kubectl get deployments -n polyglot-commerce
-                    kubectl get pods -n polyglot-commerce
-                '''
+                            sed -i \
+                                "s|image: .*|image: $image|" \
+                                "$manifest"
+                        done
+
+                        echo "===== UPDATED IMAGE TAGS ====="
+                        grep -R 'image:' apps/polyglot-commerce/
+
+                        git add apps/polyglot-commerce/
+
+                        if git diff --cached --quiet; then
+                            echo "No GitOps manifest changes detected."
+                        else
+                            git commit -m "Deploy build-$BUILD_NUMBER through GitOps"
+                            git push origin "$GITOPS_BRANCH"
+                        fi
+
+                        echo "===== GITOPS UPDATE COMPLETED ====="
+                    '''
+                }
             }
         }
     }
-}
 
-
+    post {
+        success {
+            echo 'CI completed. Argo CD will deploy the updated GitOps manifests.'
+        }
+        failure {
+            echo 'Pipeline failed. Check the stage logs.'
+        }
     }
 }
